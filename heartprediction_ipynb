@@ -1,0 +1,126 @@
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from google.colab import files
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+
+# ------------------ Upload datasets in Google Colab ------------------
+uploaded = files.upload()
+file_names = list(uploaded.keys())
+df1 = pd.read_csv(file_names[0])
+df2 = pd.read_csv(file_names[1])
+
+# ------------------ Preprocessing heart.csv ------------------
+df1 = df1.drop_duplicates()
+if df1.isnull().sum().sum() > 0:
+    df1 = df1.fillna(df1.median())
+
+# Standard Scaling
+scaler = StandardScaler()
+numerical_cols = ["age", "trestbps", "chol", "thalach", "oldpeak"]
+df1[numerical_cols] = scaler.fit_transform(df1[numerical_cols])
+df1["target"] = df1["target"].apply(lambda x: 1 if x > 0 else 0)
+
+# ------------------ Preprocessing heart4.csv ------------------
+df2 = df2.drop(columns=["id", "dataset"], errors='ignore')
+df2 = df2.rename(columns={"thalch": "thalach", "num": "target"})
+
+categorical_cols = ["sex", "cp", "restecg", "slope", "thal"]
+label_encoders = {}
+for col in categorical_cols:
+    le = LabelEncoder()
+    df2[col] = le.fit_transform(df2[col].astype(str))
+    label_encoders[col] = le
+
+df2[numerical_cols] = scaler.transform(df2[numerical_cols])
+bool_cols = ["fbs", "exang"]
+for col in bool_cols:
+    if col in df2.columns:
+        df2[col] = df2[col].astype(int)
+
+df2["target"] = df2["target"].apply(lambda x: 1 if x > 0 else 0)
+
+# ------------------ Model Training and Hyperparameter Tuning ------------------
+def tune_model(model, param_grid, X_train, y_train, use_random=False):
+    if use_random:
+        search = RandomizedSearchCV(model, param_distributions=param_grid, n_iter=20, cv=5, scoring='accuracy', n_jobs=-1, random_state=42)
+    else:
+        search = GridSearchCV(model, param_grid, cv=5, scoring='accuracy', n_jobs=-1)
+    search.fit(X_train, y_train)
+    return search.best_estimator_
+
+# Define models and hyperparameters
+model_params = {
+    "Random Forest": (RandomForestClassifier(class_weight="balanced"), {
+        "n_estimators": np.arange(50, 500, 50),
+        "max_depth": [None, 10, 20, 30, 50],
+        "min_samples_split": [2, 5, 10],
+        "min_samples_leaf": [1, 2, 4, 8]
+    }, True),  # Use RandomizedSearchCV for Random Forest
+    "Logistic Regression": (LogisticRegression(max_iter=1000, class_weight="balanced"), {"C": [0.01, 0.1, 1, 10, 100]}, False),
+    "Decision Tree": (DecisionTreeClassifier(class_weight="balanced"), {
+        "max_depth": [None, 10, 20, 30],
+        "min_samples_split": [2, 5, 10],
+        "min_samples_leaf": [1, 2, 4]
+    }, False),
+    "SVM": (SVC(probability=True, class_weight="balanced"), {
+        "C": [0.1, 1, 10, 100],
+        "kernel": ["linear", "rbf", "poly"],
+        "gamma": ["scale", "auto"]
+    }, False),
+    "KNN": (KNeighborsClassifier(), {"n_neighbors": np.arange(1, 20, 2)}, False)
+}
+
+# Prepare results dictionary
+results = {metric: {"heart.csv": [], "heart4.csv": []} for metric in ["Accuracy", "Precision", "Recall", "F1-Score", "AUC-ROC"]}
+optimized_models = {}
+
+def train_and_evaluate(dataset_name, X_train, X_test, y_train, y_test):
+    for model_name, (model, param_grid, use_random) in model_params.items():
+        best_model = tune_model(model, param_grid, X_train, y_train, use_random)
+        optimized_models[model_name] = best_model
+        y_pred = best_model.predict(X_test)
+        y_probs = best_model.predict_proba(X_test)[:, 1]
+        results["Accuracy"][dataset_name].append(accuracy_score(y_test, y_pred))
+        results["Precision"][dataset_name].append(precision_score(y_test, y_pred))
+        results["Recall"][dataset_name].append(recall_score(y_test, y_pred))
+        results["F1-Score"][dataset_name].append(f1_score(y_test, y_pred))
+        results["AUC-ROC"][dataset_name].append(roc_auc_score(y_test, y_probs))
+        print(f"{model_name} optimized and evaluated on {dataset_name}")
+
+# Train models on heart.csv
+X1, y1 = df1.drop(columns=["target"]), df1["target"]
+X1_train, X1_test, y1_train, y1_test = train_test_split(X1, y1, test_size=0.2, stratify=y1, random_state=42)
+train_and_evaluate("heart.csv", X1_train, X1_test, y1_train, y1_test)
+
+# Train models on heart4.csv
+X2, y2 = df2.drop(columns=["target"]), df2["target"]
+X2_train, X2_test, y2_train, y2_test = train_test_split(X2, y2, test_size=0.2, stratify=y2, random_state=42)
+train_and_evaluate("heart4.csv", X2_train, X2_test, y2_train, y2_test)
+
+# ------------------ Plotly Visualization ------------------
+def plot_metric_comparison(metric_name):
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=list(optimized_models.keys()), y=results[metric_name]["heart.csv"], name="heart.csv", marker_color='blue'))
+    fig.add_trace(go.Bar(x=list(optimized_models.keys()), y=results[metric_name]["heart4.csv"], name="heart4.csv", marker_color='red'))
+    
+    fig.update_layout(title=f'{metric_name} Comparison Across Models',
+                      xaxis_title='Models',
+                      yaxis_title=metric_name,
+                      barmode='group',
+                      hovermode='x',
+                      legend_title='Dataset',
+                      template='plotly_dark')
+    fig.show()
+
+for metric in results.keys():
+    plot_metric_comparison(metric)
+
+print("\nModel training, tuning, and evaluation completed successfully!")
